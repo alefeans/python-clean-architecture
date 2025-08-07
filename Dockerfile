@@ -1,42 +1,74 @@
-FROM python:3.12.0-alpine3.18 as base
+# Multi-stage build for optimal image size
+FROM python:3.12-slim as builder
 
-FROM base as requirements
+# Set environment variables for Poetry
+ENV POETRY_NO_INTERACTION=1 \
+    POETRY_VENV_IN_PROJECT=1 \
+    POETRY_CACHE_DIR=/tmp/poetry_cache \
+    POETRY_HOME="/opt/poetry" \
+    POETRY_VERSION=1.8.3
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=off \
-    PIP_DISABLE_PIP_VERSION_CHECK=on \
-    PIP_DEFAULT_TIMEOUT=100
+# Install system dependencies needed for building
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /tmp
+# Install Poetry
+RUN pip install poetry==$POETRY_VERSION
 
-RUN apk --no-cache add \
-    build-base \
-    libffi-dev \
-    musl \
-    openssl-dev \
-    gcc \
-    libc-dev \
-    linux-headers
-
-RUN pip install poetry
-
-COPY ./pyproject.toml ./poetry.lock* /tmp/
-
-RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
-
-FROM base as final
-
+# Set working directory
 WORKDIR /app
 
-COPY --from=requirements /tmp/requirements.txt /code/requirements.txt
+# Copy Poetry configuration files first (better layer caching)
+COPY pyproject.toml poetry.lock ./
 
-RUN apk --no-cache add \
-    libffi-dev \
-    gcc \
-    libc-dev
+# Configure Poetry and install only production dependencies
+RUN poetry config virtualenvs.create false \
+    && poetry install --only=main --no-root \
+    && rm -rf $POETRY_CACHE_DIR
 
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+# Production stage
+FROM python:3.12-slim as production
 
-COPY . /app
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-CMD ["python", "-m" , "pycommerce"]
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy installed packages from builder stage
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code (exclude unnecessary files via .dockerignore)
+COPY . .
+
+# Install the application using Poetry's project definition
+RUN pip install -e . --no-deps
+
+# Change ownership to non-root user
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 8080
+
+# Add health check (requires adding health endpoint to your app)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8080/health', timeout=5)" || exit 1
+
+# Run the application
+CMD ["python", "-m", "app"]

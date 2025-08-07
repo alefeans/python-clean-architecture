@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 
 import pytest
+from asgi_lifespan import LifespanManager
+import httpx
 from httpx import AsyncClient
 from sqlmodel import SQLModel
 
-from pycommerce.infra.api.app import create_app
-from pycommerce.infra.db import engine
+from app.infra.api.app import create_app
+from app.infra.db import engine
 
 
 @pytest.fixture
@@ -33,5 +35,8 @@ async def clear_database():
 @pytest.fixture()
 async def client(app, base_url):
     async with clear_database():
-        async with AsyncClient(app=app, base_url=base_url) as async_client:
-            yield async_client
+        async with LifespanManager(app):
+            async with AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url=base_url
+            ) as async_client:
+                yield async_client

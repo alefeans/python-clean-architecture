@@ -1,86 +1,102 @@
-version: '3'
-
 volumes:
   pg-db-data:
     driver: local
   pg-admin-data:
     driver: local
 
-networks: 
+networks:
   pg-network:
     driver: bridge
 
 services:
+    # Production build base
     base: &base
         hostname: app
-        image: pycommerce
-        build: .
-        working_dir: /code
-        volumes:
-          - ./:/code
+        image: python-template:production
+        build:
+          context: .
+          dockerfile: Dockerfile
         environment: &env
             ENV: "dev"
-            LOG_LEVEL: "debug"
-            DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/pycommerce_dev"
+            LOG_LEVEL: "DEBUG"
+            DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/app_dev"
             PYTHONDONTWRITEBYTECODE: 1
         depends_on:
           pg-db:
             condition: service_healthy
 
+    # Development build base (with dev dependencies and hot reload)
+    dev-base: &dev-base
+        hostname: app-dev
+        image: python-template:development
+        build:
+          context: .
+          dockerfile: Dockerfile.dev
+        working_dir: /app
+        volumes:
+          - ./:/app
+        environment: *env
+        depends_on:
+          pg-db:
+            condition: service_healthy
+
+    # Production app (optimized image)
     app:
         <<: *base
-        command: /bin/sh -c "alembic upgrade head && python -m pycommerce"
+        command: /bin/sh -c "alembic upgrade head && python -m app"
         ports:
           - "8080:8080"
         networks:
           - pg-network
-    
-    tests:
-        <<: *base
-        command: /bin/sh -c "pip install pytest pytest-asyncio && pytest tests/"
-        environment:
-          <<: *env
-          ENV: "test"
-          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/pycommerce_test"
+
+    # Development app (with hot reload)
+    app-dev:
+        <<: *dev-base
+        command: /bin/sh -c "alembic upgrade head && python -m app"
+        ports:
+          - "8080:8080"
         networks:
           - pg-network
 
-    watch:
-        <<: *base
-        command: /bin/sh -c "pip install pytest pytest-asyncio pytest-watch && ptw -w -c tests/"
-        working_dir: /code
-        volumes:
-          - ./:/code
+    # Testing services (use dev image with all dependencies)
+    tests:
+        <<: *dev-base
+        command: /bin/sh -c "pytest tests/"
         environment:
           <<: *env
           ENV: "test"
-          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/pycommerce_test"
+          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/app_test"
+        networks:
+          - pg-network
+
+    # Watch mode services (use dev image for fast feedback)
+    watch:
+        <<: *dev-base
+        command: /bin/sh -c "ptw -w -c tests/"
+        environment:
+          <<: *env
+          ENV: "test"
+          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/app_test"
         networks:
           - pg-network
 
     watch-unit:
-        <<: *base
-        command: /bin/sh -c "pip install pytest pytest-asyncio pytest-watch && ptw -w -c tests/unit/"
-        working_dir: /code
-        volumes:
-          - ./:/code
+        <<: *dev-base
+        command: /bin/sh -c "ptw -w -c tests/unit/"
         environment:
           <<: *env
           ENV: "test"
-          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/pycommerce_test"
+          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/app_test"
         networks:
           - pg-network
 
     watch-integration:
-        <<: *base
-        command: /bin/sh -c "pip install pytest pytest-asyncio pytest-watch && ptw -w -c tests/integration/"
-        working_dir: /code
-        volumes:
-          - ./:/code
+        <<: *dev-base
+        command: /bin/sh -c "ptw -w -c tests/integration/"
         environment:
           <<: *env
           ENV: "test"
-          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/pycommerce_test"
+          DB_URL: "postgresql+asyncpg://postgres:passwd@pg-db:5432/app_test"
         networks:
           - pg-network
 
