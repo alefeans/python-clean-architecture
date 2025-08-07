@@ -8,7 +8,7 @@
   </a>
 </p>
 
-Production-ready modern Python template featuring **Clean Architecture**, **Domain-Driven Design (DDD)**, and **FastAPI** 🚀. It demonstrates how to structure applications with proper separation of concerns, comprehensive testing, and type safety.
+Production-ready modern Python template featuring **Clean Architecture**, **Domain-Driven Design (DDD)**, and **FastAPI**. It demonstrates how to structure applications with proper separation of concerns, comprehensive testing, and type safety.
 
 ## Technology Stack
 
