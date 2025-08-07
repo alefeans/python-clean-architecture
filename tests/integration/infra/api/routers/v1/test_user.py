@@ -35,15 +35,12 @@ async def test_get_user_invalid_id(client, user_route):
     data, status_code = response.json(), response.status_code
 
     assert status_code == 422
-    assert data == {
-        "detail": [
-            {
-                "loc": ["path", "user_id"],
-                "msg": "value is not a valid uuid",
-                "type": "type_error.uuid",
-            }
-        ]
-    }
+    assert "detail" in data
+    assert len(data["detail"]) == 1
+    error = data["detail"][0]
+    assert error["loc"] == ["path", "user_id"]
+    assert error["type"] == "uuid_parsing"
+    assert "Input should be a valid UUID" in error["msg"]
 
 
 async def test_create_user_persistence(client, user_route, create_user_payload):

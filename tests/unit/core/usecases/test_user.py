@@ -1,186 +1,297 @@
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
-from pycommerce.core.dtos.user import CreateUser, UpdateUser
-from pycommerce.core.entities.user import Email, InvalidUser, Password
-from pycommerce.core.protocols.crypto import Hasher
-from pycommerce.core.protocols.user import UserRepo
-from pycommerce.core.usecases import user
-from tests.unit.core.usecases.fakes.user import FakeUserRepo, FakeUserUnitOfWork, SpyUserHasher
+from app.core.dtos.user import CreateUserRequest, UpdateUser
+from app.core.entities.user import User
+from app.core.exceptions import (
+    AuthenticationFailedError,
+    InvalidUserError,
+    UserAlreadyExistsError,
+    UserNotFoundError,
+)
+from app.core.usecases.user import (
+    AuthenticateUserUsecase,
+    CreateUserUsecase,
+    DeleteUserUsecase,
+    GetUserUsecase,
+    UpdateUserUsecase,
+)
+from app.core.value_objects.email import Email
+from app.core.value_objects.id import ID
+from app.core.value_objects.password import Password
 
 
 @pytest.fixture
 def create_user_dto():
-    return CreateUser("Test", Email("test@test.com"), Password("password"))
+    return CreateUserRequest(name="Test", email="test@test.com", password="password")
 
 
 @pytest.fixture
-def user_repo() -> UserRepo:
-    return FakeUserRepo()
-
-
-@pytest.fixture
-def hasher() -> Hasher:
-    return SpyUserHasher()
-
-
-@pytest.fixture
-def user_uow(user_repo: UserRepo) -> FakeUserUnitOfWork:
-    return FakeUserUnitOfWork(user_repo)
-
-
-async def test_if_creates_user(user_uow, hasher, create_user_dto):
-    result = await user.create(user_uow, hasher, create_user_dto)
-    persisted_user = await user_uow.user_repo.get_by_id(result.id)
-
-    assert user_uow.committed
-    assert create_user_dto.name == persisted_user.name
-    assert create_user_dto.email == persisted_user.email
-    assert create_user_dto.password != persisted_user.password
-    assert hasher.calls == [("hash", create_user_dto.password)]
-
-
-async def test_if_validates_password_before_hashing(user_uow, hasher):
-    user_small_password = CreateUser("Test", Email("test@test.com"), Password("small"))
-    with pytest.raises(InvalidUser):
-        await user.create(user_uow, hasher, user_small_password)
-
-    user_big_password = CreateUser("Test", Email("test@test.com"), Password("p" * 101))
-    with pytest.raises(InvalidUser):
-        await user.create(user_uow, hasher, user_big_password)
-
-    assert hasher.calls == []
-    assert not user_uow.committed
-
-
-async def test_if_raises_when_creating_duplicated_user(user_uow, hasher, create_user_dto):
-    with pytest.raises(
-        user.UserAlreadyExists, match=f"User {create_user_dto.email} already exists"
-    ):
-        await user.create(user_uow, hasher, create_user_dto)
-        await user.create(user_uow, hasher, create_user_dto)
-        assert len(user_uow.user_repo) == 1
-
-
-async def test_if_get_user_by_id(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-    fetched_user = await user.get_by_id(user_uow.user_repo, created_user.id)
-
-    assert fetched_user is not None
-    assert created_user.id == fetched_user.id
-    assert created_user.name == fetched_user.name
-    assert created_user.email == fetched_user.email
-
-
-async def test_if_returns_none_when_getting_nonexisting_user(user_repo):
-    assert await user.get_by_id(user_repo, uuid4()) is None
-
-
-async def test_if_returns_false_when_deleting_nonexisting_user(user_uow):
-    assert await user.delete(user_uow, uuid4()) is False
-
-
-async def test_if_returns_true_when_deleting_existing_user(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-
-    assert len(user_uow.user_repo) == 1
-    assert await user.delete(user_uow, created_user.id) is True
-    assert len(user_uow.user_repo) == 0
-
-
-async def test_if_updates_user_name(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-    to_update = UpdateUser("changed")
-
-    updated = await user.update(user_uow, created_user.id, to_update)
-
-    assert updated is not None
-    assert user_uow.committed
-    assert to_update.name == updated.name
-    assert created_user.id == updated.id
-    assert created_user.name != updated.name
-    assert created_user.email == updated.email
-
-
-async def test_if_updates_user_email(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-
-    to_update = UpdateUser(email=Email("changed@mail.com"))
-    updated = await user.update(user_uow, created_user.id, to_update)
-
-    assert updated is not None
-    assert user_uow.committed
-    assert to_update.email == updated.email
-    assert created_user.id == updated.id
-    assert created_user.email != updated.email
-    assert created_user.name == updated.name
-
-
-async def test_if_fully_updates_user(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-
-    to_update = UpdateUser("changed", email=Email("changed@mail.com"))
-    updated = await user.update(user_uow, created_user.id, to_update)
-
-    assert updated is not None
-    assert user_uow.committed
-    assert to_update.name == updated.name
-    assert to_update.email == updated.email
-    assert created_user.id == updated.id
-    assert created_user.email != updated.email
-    assert created_user.name != updated.name
-
-
-async def test_if_keeps_password_unchanged_when_updating(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-    before_update = await user_uow.user_repo.get_by_id(created_user.id)
-
-    await user.update(user_uow, created_user.id, UpdateUser("changed"))
-    after_update = await user_uow.user_repo.get_by_id(created_user.id)
-
-    assert before_update.password == after_update.password
-
-
-async def test_if_returns_none_when_updating_nonexisting_user(user_uow):
-    to_update = UpdateUser("changed", email=Email("changed@mail.com"))
-    assert await user.update(user_uow, uuid4(), to_update) is None
-
-
-async def test_if_authenticates_user(user_uow, hasher, create_user_dto):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-    from_repo = await user_uow.user_repo.get_by_id(created_user.id)
-
-    result = await user.authenticate(
-        user_uow.user_repo, hasher, create_user_dto.email, create_user_dto.password
+def mock_user():
+    """Create a mock user entity."""
+    return User(
+        id=ID.generate(),
+        name="Test",
+        email=Email("test@test.com"),
+        password=Password("hashed_password"),
     )
 
+
+@pytest.fixture
+def mock_hasher():
+    """Create a mock hasher."""
+    hasher = MagicMock()
+    hasher.hash.return_value = "hashed_password"
+    hasher.verify.return_value = True
+    return hasher
+
+
+@pytest.fixture
+def mock_user_repo():
+    """Create a mock user repository."""
+    repo = MagicMock()
+    repo.save = AsyncMock()
+    repo.get_by_id = AsyncMock()
+    repo.get_by_email = AsyncMock()
+    repo.delete = AsyncMock()
+    repo.update = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def mock_user_uow(mock_user_repo):
+    """Create a mock unit of work."""
+    uow = MagicMock()
+    uow.user_repo = mock_user_repo
+    uow.commit = AsyncMock()
+    uow.rollback = AsyncMock()
+    uow.__aenter__ = AsyncMock(return_value=uow)
+    uow.__aexit__ = AsyncMock(return_value=None)
+    return uow
+
+
+async def test_if_creates_user(mock_user_uow, mock_hasher, create_user_dto):
+    mock_user_uow.user_repo.get_by_email.return_value = None
+
+    use_case = CreateUserUsecase(uow=mock_user_uow, hasher=mock_hasher)
+    result = await use_case.execute(create_user_dto)
+
+    assert result.name == create_user_dto.name
+    assert result.email == create_user_dto.email
+    assert isinstance(result.id, str)
+
+    mock_hasher.hash.assert_called_once_with("password")
+    mock_user_uow.user_repo.save.assert_called_once()
+    mock_user_uow.user_repo.get_by_email.assert_called_once()
+
+
+async def test_if_validates_password_before_hashing(mock_user_uow, mock_hasher):
+    user_small_password = CreateUserRequest(
+        name="Test", email="test@test.com", password="small"
+    )
+    use_case = CreateUserUsecase(uow=mock_user_uow, hasher=mock_hasher)
+
+    with pytest.raises(InvalidUserError):
+        await use_case.execute(user_small_password)
+
+    user_big_password = CreateUserRequest(
+        name="Test", email="test@test.com", password="p" * 101
+    )
+    with pytest.raises(InvalidUserError):
+        await use_case.execute(user_big_password)
+
+    mock_hasher.hash.assert_not_called()
+
+
+async def test_if_raises_when_creating_duplicated_user(
+    mock_user_uow, mock_hasher, create_user_dto, mock_user
+):
+    mock_user_uow.user_repo.get_by_email.return_value = mock_user
+
+    use_case = CreateUserUsecase(uow=mock_user_uow, hasher=mock_hasher)
+
+    with pytest.raises(
+        UserAlreadyExistsError, match=f"User with email {create_user_dto.email} already exists"
+    ):
+        await use_case.execute(create_user_dto)
+
+    mock_user_uow.user_repo.save.assert_not_called()
+
+
+async def test_if_get_user_by_id(mock_user_repo, mock_user):
+    mock_user_repo.get_by_id.return_value = mock_user
+
+    use_case = GetUserUsecase(user_repo=mock_user_repo)
+    result = await use_case.execute(str(mock_user.id))
+
+    assert result.id == str(mock_user.id)
+    assert result.name == mock_user.name
+    assert result.email == mock_user.email.value
+    mock_user_repo.get_by_id.assert_called_once()
+
+
+async def test_if_returns_none_when_getting_nonexisting_user(mock_user_repo):
+    mock_user_repo.get_by_id.return_value = None
+
+    use_case = GetUserUsecase(user_repo=mock_user_repo)
+
+    with pytest.raises(UserNotFoundError):
+        await use_case.execute(str(uuid4()))
+
+    mock_user_repo.get_by_id.assert_called_once()
+
+
+async def test_if_returns_false_when_deleting_nonexisting_user(mock_user_repo):
+    mock_user_repo.delete.return_value = False
+
+    use_case = DeleteUserUsecase(user_repo=mock_user_repo)
+    result = await use_case.execute(str(uuid4()))
+
+    assert result is False
+    mock_user_repo.delete.assert_called_once()
+
+
+async def test_if_returns_true_when_deleting_existing_user(mock_user_repo):
+    mock_user_repo.delete.return_value = True
+
+    use_case = DeleteUserUsecase(user_repo=mock_user_repo)
+    result = await use_case.execute(str(uuid4()))
+
+    assert result is True
+    mock_user_repo.delete.assert_called_once()
+
+
+async def test_if_updates_user_name(mock_user_uow, mock_user):
+    updated_user = User(
+        id=mock_user.id,
+        name="changed",
+        email=mock_user.email,
+        password=mock_user.password,
+    )
+
+    mock_user_uow.user_repo.get_by_id.return_value = mock_user
+    mock_user_uow.user_repo.update.return_value = updated_user
+
+    use_case = UpdateUserUsecase(uow=mock_user_uow)
+    to_update = UpdateUser("changed")
+    result = await use_case.execute(str(mock_user.id), to_update)
+
+    assert result.name == "changed"
+    assert result.id == str(mock_user.id)
+    assert result.email == mock_user.email.value
+    mock_user_uow.user_repo.update.assert_called_once()
+
+
+async def test_if_updates_user_email(mock_user_uow, mock_user):
+    updated_user = User(
+        id=mock_user.id,
+        name=mock_user.name,
+        email=Email("changed@mail.com"),
+        password=mock_user.password,
+    )
+
+    mock_user_uow.user_repo.get_by_id.return_value = mock_user
+    mock_user_uow.user_repo.update.return_value = updated_user
+
+    use_case = UpdateUserUsecase(uow=mock_user_uow)
+    to_update = UpdateUser(email="changed@mail.com")
+    result = await use_case.execute(str(mock_user.id), to_update)
+
+    assert result.email == "changed@mail.com"
+    assert result.id == str(mock_user.id)
+    assert result.name == mock_user.name
+    mock_user_uow.user_repo.update.assert_called_once()
+
+
+async def test_if_fully_updates_user(mock_user_uow, mock_user):
+    updated_user = User(
+        id=mock_user.id,
+        name="changed",
+        email=Email("changed@mail.com"),
+        password=mock_user.password,
+    )
+
+    mock_user_uow.user_repo.get_by_id.return_value = mock_user
+    mock_user_uow.user_repo.update.return_value = updated_user
+
+    use_case = UpdateUserUsecase(uow=mock_user_uow)
+    to_update = UpdateUser("changed", email="changed@mail.com")
+    result = await use_case.execute(str(mock_user.id), to_update)
+
+    assert result.name == "changed"
+    assert result.email == "changed@mail.com"
+    assert result.id == str(mock_user.id)
+    mock_user_uow.user_repo.update.assert_called_once()
+
+
+async def test_if_keeps_password_unchanged_when_updating(mock_user_uow, mock_user):
+    updated_user = User(
+        id=mock_user.id,
+        name="changed",
+        email=mock_user.email,
+        password=mock_user.password,
+    )
+
+    mock_user_uow.user_repo.get_by_id.return_value = mock_user
+    mock_user_uow.user_repo.update.return_value = updated_user
+
+    use_case = UpdateUserUsecase(uow=mock_user_uow)
+    await use_case.execute(str(mock_user.id), UpdateUser("changed"))
+
+    # Verify the update was called with the same password
+    called_user = mock_user_uow.user_repo.update.call_args[0][0]
+    assert called_user.password == mock_user.password
+
+
+async def test_if_returns_none_when_updating_nonexisting_user(mock_user_uow):
+    mock_user_uow.user_repo.get_by_id.return_value = None
+
+    to_update = UpdateUser("changed", email="changed@mail.com")
+    use_case = UpdateUserUsecase(uow=mock_user_uow)
+
+    with pytest.raises(UserNotFoundError):
+        await use_case.execute(str(uuid4()), to_update)
+
+    mock_user_uow.user_repo.update.assert_not_called()
+
+
+async def test_if_authenticates_user(mock_user_repo, mock_hasher, mock_user):
+    mock_user_repo.get_by_email.return_value = mock_user
+    mock_hasher.verify.return_value = True
+
+    use_case = AuthenticateUserUsecase(user_repo=mock_user_repo, hasher=mock_hasher)
+    result = await use_case.execute("test@test.com", "password")
+
     assert result is not None
-    assert hasher.calls[-1] == ("verify", f"{create_user_dto.password}, {from_repo.password}")
+    assert result.id == str(mock_user.id)
+    assert result.email == mock_user.email.value
+    mock_hasher.verify.assert_called_once_with("password", mock_user.password.value)
 
 
 async def test_if_returns_none_when_authenticating_nonexisting_user(
-    user_repo, hasher, create_user_dto
+    mock_user_repo, mock_hasher
 ):
-    result = await user.authenticate(
-        user_repo, hasher, create_user_dto.email, create_user_dto.password
-    )
+    mock_user_repo.get_by_email.return_value = None
 
-    assert result is None
-    assert hasher.calls == []
+    use_case = AuthenticateUserUsecase(user_repo=mock_user_repo, hasher=mock_hasher)
+
+    with pytest.raises(AuthenticationFailedError):
+        await use_case.execute("test@test.com", "password")
+
+    mock_hasher.verify.assert_not_called()
 
 
 async def test_if_returns_none_when_authenticating_with_invalid_password(
-    user_uow, hasher, create_user_dto
+    mock_user_repo, mock_hasher, mock_user
 ):
-    created_user = await user.create(user_uow, hasher, create_user_dto)
-    from_repo = await user_uow.user_repo.get_by_id(created_user.id)
-    hasher.valid = False
-    invalid_password = Password("invalid")
+    mock_user_repo.get_by_email.return_value = mock_user
+    mock_hasher.verify.return_value = False
 
-    result = await user.authenticate(
-        user_uow.user_repo, hasher, create_user_dto.email, invalid_password
-    )
+    use_case = AuthenticateUserUsecase(user_repo=mock_user_repo, hasher=mock_hasher)
 
-    assert result is None
-    assert hasher.calls[-1] == ("verify", f"{invalid_password}, {from_repo.password}")
+    with pytest.raises(AuthenticationFailedError):
+        await use_case.execute("test@test.com", "invalid_password")
+
+    mock_hasher.verify.assert_called_once_with("invalid_password", mock_user.password.value)
